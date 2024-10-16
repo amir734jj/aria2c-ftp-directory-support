@@ -45,14 +45,16 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
     if protocol == "sftp":
         remote_url = f"sftp://{host}:{port}{remote_path}"
     elif protocol == "ftp":
-        remote_url = f"ftp://{user}:{password}@{host}:{port}{remote_path}"
+        remote_url = f"ftp://{host}:{port}{remote_path}"
 
     aria2c_command = [
         "aria2c",
-        f"-x{max_connections}",  # Number of connections
-        "-d", local_dir,  # Set the download directory
-        "-o", item_filename,  # Set the output filename
-        remote_url
+        f"--ftp-user={user}",
+        f"--ftp-passwd={password}",
+        remote_url,
+        f"-x{max_connections}", # Number of connections
+        "-d", local_dir,        # Set the download directory
+        "-o", item_filename,    # Set the output filename
     ]
 
     print(f"Starting download: {remote_path} -> {local_file_path}")
@@ -169,8 +171,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Example usage for SFTP:
-# ./crawl.py --protocol sftp --host sftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
-# Example usage for FTP:
-# ./crawl.py --protocol ftp --host ftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
