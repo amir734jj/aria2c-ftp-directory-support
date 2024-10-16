@@ -28,8 +28,15 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# Function to download a single file using aria2c
-def download_file(protocol, remote_path, local_dir, item_filename, item_size, user, password, host, port, max_connections, force):
+# Function to download a single file using aria2c with extension filtering
+def download_file(protocol, remote_path, local_dir, item_filename, item_size, user, password, host, port, max_connections, force, filter_extension):
+    print("executing download_file for " + remote_path + filter_extension)
+    
+    # Check if the file matches the extension filter (if provided)
+    if filter_extension and not any(map(lambda x: item_filename.endswith(x), filter_extension.split(','))):
+        print(f"Skipping {item_filename}: does not match extension {filter_extension}")
+        return
+
     local_file_path = os.path.join(local_dir, item_filename)
 
     # Check if the file exists and if its size matches the remote file size
@@ -64,7 +71,7 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
     return process.returncode  # Return the exit code
 
 # Function to handle FTP directory crawling and file listing
-def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force):
+def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension):
     # Ensure the local directory exists
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
@@ -79,13 +86,13 @@ def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, por
         if metadata['type'] == 'dir':
             # Recursively crawl into the directory
             print(f"Entering directory: {remote_path}")
-            ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force)
+            ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension)
         else:
             size = int(metadata['size'])
-            executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force)
+            executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
 
 # Function to handle SFTP directory crawling and file listing
-def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force):
+def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension):
     # Ensure the local directory exists
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
@@ -98,10 +105,10 @@ def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, p
         if stat.S_ISDIR(item.st_mode):
             # Recursively crawl into the directory
             print(f"Entering directory: {remote_path}")
-            sftp_recursive_download(sftp, remote_path, local_path, user, password, host, port, max_connections, executor, force)
+            sftp_recursive_download(sftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension)
         else:
             # Submit the download task to the executor with file size check
-            executor.submit(download_file, "sftp", remote_path, local_dir, item.filename, item.st_size, user, password, host, port, max_connections, force)
+            executor.submit(download_file, "sftp", remote_path, local_dir, item.filename, item.st_size, user, password, host, port, max_connections, force, filter_extension)
 
 def main():
     # Parse command-line arguments
@@ -116,6 +123,7 @@ def main():
     parser.add_argument("--force", action="store_true", help="Overwrite files even if they exist with the same size.")
     parser.add_argument("--max-concurrency", type=int, default=4, help="Maximum number of concurrent downloads (default: 4).")
     parser.add_argument("--max-connections", type=int, default=8, help="Maximum number of aria2c connections per file (default: 8).")
+    parser.add_argument("--filter-extension", default="", help="Download only files with the specified extension.")
     args = parser.parse_args()
 
     # Set default ports if not provided
@@ -139,7 +147,7 @@ def main():
             print(f"Starting download from {args.remote_dir}...")
 
             with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force)
+                sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
 
             sftp.close()
         except Exception as e:
@@ -159,7 +167,7 @@ def main():
 
             print(f"Starting download from {args.remote_dir}...")
             with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force)
+                ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
 
             ftp.quit()
         except Exception as e:
