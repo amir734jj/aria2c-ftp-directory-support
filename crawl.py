@@ -171,6 +171,6 @@ if __name__ == "__main__":
     main()
 
 # Example usage for SFTP:
-# ./download_script.py --protocol sftp --host sftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
+# ./crawl.py --protocol sftp --host sftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
 # Example usage for FTP:
-# ./download_script.py --protocol ftp --host ftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
+# ./crawl.py --protocol ftp --host ftp.example.com --user myuser --password mypass --remote-dir /remote/dir --local-dir ./localdir --max-concurrency 5 --max-connections 10 --force
