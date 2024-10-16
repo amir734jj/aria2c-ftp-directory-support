@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-import paramiko, os, stat, subprocess, argparse, signal, sys
-import ftplib
+import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib
 from concurrent.futures import ThreadPoolExecutor
 
 # List to track subprocesses
