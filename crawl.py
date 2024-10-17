@@ -56,6 +56,8 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
 
     aria2c_command = [
         "aria2c",
+        "--file-allocation=none",
+        "--log-level=error",
         f"--ftp-user={user}",
         f"--ftp-passwd={password}",
         remote_url,
@@ -122,7 +124,7 @@ def main():
     parser.add_argument("--local-dir", default="./downloads", help="Local directory to save downloaded files.")
     parser.add_argument("--force", action="store_true", help="Overwrite files even if they exist with the same size.")
     parser.add_argument("--max-concurrency", type=int, default=4, help="Maximum number of concurrent downloads (default: 4).")
-    parser.add_argument("--max-connections", type=int, default=8, help="Maximum number of aria2c connections per file (default: 8).")
+    parser.add_argument("--max-connections", type=int, default=4, help="Maximum number of aria2c connections per file (default: 4).")
     parser.add_argument("--filter-extension", default="", help="Download only files with the specified extension.")
     args = parser.parse_args()
 
