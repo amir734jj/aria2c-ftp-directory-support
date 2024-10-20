@@ -9,3 +9,9 @@ Simple python script that uses aria2c to download remote directories from FTP/SF
 # Example usage for FTP:
 # ./crawl.py --protocol ftp --host ftp.example.com --user myuser --password mypass
 ```
+
+Requirements
+
+```shell
+pip install -r requirements.txt
+```
