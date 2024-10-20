@@ -55,6 +55,8 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
 
     aria2c_command = [
         "aria2c",
+        "--download-result=hide",
+        "--summary-interval=0",
         "--file-allocation=none",
         "--log-level=error",
         f"--ftp-user={user}",
