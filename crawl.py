@@ -165,14 +165,20 @@ def main():
         try:
             ftp = ftplib.FTP()
             print("Connecting to FTP server...")
-            ftp.connect(args.host, args.port)
+            ftp.connect(args.host, args.port, timeout=60) # Set timeout to 60 seconds
             ftp.login(args.user, args.password)
 
             print(f"Starting download from {args.remote_dir}...")
             with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
                 ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
 
-            ftp.quit()
+            try:
+                ftp.voidcmd("NOOP")
+                ftp.quit()
+            except EOFError:
+                print("FTP connection was already closed.")
+            except Exception as e:
+                print(f"An unexpected error occurred during quit: {e}")
         except Exception as e:
             print(f"An error occurred: {e}")
             stop_all_subprocesses()
