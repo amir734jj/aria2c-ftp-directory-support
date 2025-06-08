@@ -27,14 +27,61 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
+def delete_sftp_file(sftp, path):
+    try:
+        print(f"Attempting to delete: {path}")
+        sftp.remove(path)
+        print(f"Deleted: {path}")
+
+        # Attempt to delete parent directory if empty
+        dir_path = os.path.dirname(path)
+        try:
+            files = sftp.listdir(dir_path)
+            if len(files) == 0:
+                sftp.rmdir(dir_path)
+                print(f"Deleted empty directory: {dir_path}")
+            else:
+                print(f"Directory not empty, skipping delete: {dir_path}")
+        except IOError as e:
+            print(f"Error listing directory {dir_path}: {e}")
+    except FileNotFoundError:
+        print(f"File already deleted or not found: {path}")
+    except IOError as e:
+        print(f"Permission or IO error deleting file {path}: {e}")
+    except Exception as e:
+        print(f"Unexpected error deleting file {path}: {e}")
+
+def delete_ftp_file(ftp, path):
+    try:
+        print(f"Attempting to delete: {path}")
+        ftp.delete(path)
+        print(f"Deleted: {path}")
+
+        # Attempt to delete parent directory *only if it's empty*
+        dir_path = '/'.join(path.strip('/').split('/')[:-1])
+        if dir_path:
+            try:
+                files = ftp.nlst(dir_path)
+                if len(files) == 0:
+                    ftp.rmd(dir_path)
+                    print(f"Deleted directory: {dir_path}")
+                else:
+                    print(f"Directory not empty, skipping delete: {dir_path}")
+            except ftplib.error_perm as e:
+                print(f"Could not delete directory {dir_path}: {e}")
+    except ftplib.error_perm as e:
+        print(f"Permission error deleting file {path}: {e}")
+    except Exception as e:
+        print(f"Unexpected error deleting file {path}: {e}")
+
 # Function to download a single file using aria2c with extension filtering
 def download_file(protocol, remote_path, local_dir, item_filename, item_size, user, password, host, port, max_connections, force, filter_extension):
     print("executing download_file for " + remote_path + filter_extension)
-    
+
     # Check if the file matches the extension filter (if provided)
     if filter_extension and not any(map(lambda x: item_filename.endswith(x), filter_extension.split(','))):
         print(f"Skipping {item_filename}: does not match extension {filter_extension}")
-        return
+        return remote_path  # Success
 
     local_file_path = os.path.join(local_dir, item_filename)
 
@@ -44,7 +91,7 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
 
         if local_file_size == item_size and not force:
             print(f"Skipping {local_file_path}: file exists with the same size.")
-            return
+            return remote_path  # Success
         elif local_file_size != item_size:
             print(f"File {local_file_path} exists but sizes differ: local size {local_file_size}, remote size {item_size}. Re-downloading.")
 
@@ -70,10 +117,15 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
     process = subprocess.Popen(aria2c_command)
     subprocesses.append(process)  # Track this subprocess
     process.wait()  # Wait for the process to complete
-    return process.returncode  # Return the exit code
+    exit_code = process.returncode
+    if exit_code == 0:
+        return remote_path  # Success
+    else:
+        print(f"Failed to download: {remote_path}")
+        return None
 
 # Function to handle FTP directory crawling and file listing
-def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension):
+def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
     # Ensure the local directory exists
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
@@ -88,13 +140,15 @@ def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, por
         if metadata['type'] == 'dir':
             # Recursively crawl into the directory
             print(f"Entering directory: {remote_path}")
-            ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension)
+            ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote)
         else:
             size = int(metadata['size'])
-            executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
+            future = executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
+            if cleanup_remote:
+                future.add_done_callback(lambda f: print(f"Scheduling deletion for {remote_path}") or delete_ftp_file(ftp, remote_path) if f.result() else None)
 
 # Function to handle SFTP directory crawling and file listing
-def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension):
+def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
     # Ensure the local directory exists
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
@@ -107,10 +161,12 @@ def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, p
         if stat.S_ISDIR(item.st_mode):
             # Recursively crawl into the directory
             print(f"Entering directory: {remote_path}")
-            sftp_recursive_download(sftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension)
+            sftp_recursive_download(sftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote)
         else:
             # Submit the download task to the executor with file size check
-            executor.submit(download_file, "sftp", remote_path, local_dir, item.filename, item.st_size, user, password, host, port, max_connections, force, filter_extension)
+            future = executor.submit(download_file, "sftp", remote_path, local_dir, item.filename, item.st_size, user, password, host, port, max_connections, force, filter_extension)
+            if cleanup_remote:
+                future.add_done_callback(lambda f: print(f"Scheduling deletion for {remote_path}") or delete_sftp_file(sftp, remote_path) if f.result() else None)
 
 def main():
     # Parse command-line arguments
@@ -128,6 +184,7 @@ def main():
     parser.add_argument("--filter-extension", default="", help="Download only files with the specified extension.")
     parser.add_argument("--watch", action="store_true", help="Watch the remote directory and recheck periodically when no files match.")
     parser.add_argument("--watch-interval", type=int, default=30, help="Interval in seconds to wait before rechecking in watch mode (default: 30s).")
+    parser.add_argument("--cleanup-remote", action="store_true", help="Delete remote file and empty directories after successful download.")
     args = parser.parse_args()
 
     # Set default ports if not provided
@@ -151,7 +208,7 @@ def main():
             while True:
                 print(f"Scanning {args.remote_dir}...")
                 with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                    sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
+                    sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension, args.cleanup_remote)
 
                 if args.watch:
                     print(f"Watching... (retrying in {args.watch_interval} seconds)")
@@ -178,7 +235,7 @@ def main():
             while True:
                 print(f"Scanning {args.remote_dir}...")
                 with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                    ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
+                    ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension, args.cleanup_remote)
 
                 if args.watch:
                     print(f"Watching... (retrying in {args.watch_interval} seconds)")
