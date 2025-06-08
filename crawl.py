@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib
+import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib, time
 from concurrent.futures import ThreadPoolExecutor
 
 # List to track subprocesses
@@ -48,6 +48,7 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
         elif local_file_size != item_size:
             print(f"File {local_file_path} exists but sizes differ: local size {local_file_size}, remote size {item_size}. Re-downloading.")
 
+    remote_url = None
     if protocol == "sftp":
         remote_url = f"sftp://{host}:{port}{remote_path}"
     elif protocol == "ftp":
@@ -56,9 +57,7 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
     aria2c_command = [
         "aria2c",
         "--download-result=hide",
-        "--summary-interval=0",
         "--file-allocation=none",
-        "--log-level=error",
         f"--ftp-user={user}",
         f"--ftp-passwd={password}",
         remote_url,
@@ -127,6 +126,8 @@ def main():
     parser.add_argument("--max-concurrency", type=int, default=4, help="Maximum number of concurrent downloads (default: 4).")
     parser.add_argument("--max-connections", type=int, default=4, help="Maximum number of aria2c connections per file (default: 4).")
     parser.add_argument("--filter-extension", default="", help="Download only files with the specified extension.")
+    parser.add_argument("--watch", action="store_true", help="Watch the remote directory and recheck periodically when no files match.")
+    parser.add_argument("--watch-interval", type=int, default=30, help="Interval in seconds to wait before rechecking in watch mode (default: 30s).")
     args = parser.parse_args()
 
     # Set default ports if not provided
@@ -147,10 +148,16 @@ def main():
             ssh.connect(args.host, port=args.port, username=args.user, password=args.password)
 
             sftp = ssh.open_sftp()
-            print(f"Starting download from {args.remote_dir}...")
+            while True:
+                print(f"Scanning {args.remote_dir}...")
+                with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
+                    sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
 
-            with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
+                if args.watch:
+                    print(f"Watching... (retrying in {args.watch_interval} seconds)")
+                    time.sleep(args.watch_interval)
+                else:
+                    break
 
             sftp.close()
         except Exception as e:
@@ -168,9 +175,16 @@ def main():
             ftp.connect(args.host, args.port, timeout=60) # Set timeout to 60 seconds
             ftp.login(args.user, args.password)
 
-            print(f"Starting download from {args.remote_dir}...")
-            with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
-                ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
+            while True:
+                print(f"Scanning {args.remote_dir}...")
+                with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
+                    ftp_recursive_download(ftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension)
+
+                if args.watch:
+                    print(f"Watching... (retrying in {args.watch_interval} seconds)")
+                    time.sleep(args.watch_interval)
+                else:
+                    break
 
             try:
                 ftp.voidcmd("NOOP")
