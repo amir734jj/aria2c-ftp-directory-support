@@ -124,6 +124,16 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
         print(f"Failed to download: {remote_path}")
         return None
 
+# Function to check if an FTP path is a directory
+def is_ftp_dir(ftp, name):
+    current = ftp.pwd()
+    try:
+        ftp.cwd(name)
+        ftp.cwd(current)
+        return True
+    except ftplib.error_perm:
+        return False
+
 # Function to handle FTP directory crawling and file listing
 def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
     # Ensure the local directory exists
@@ -132,8 +142,40 @@ def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, por
 
     # List the contents of the remote directory
     ftp.cwd(remote_dir)
-    for item in ftp.mlsd():
-        name, metadata = item
+    
+    # Try using MLSD first, fallback to NLST if it fails
+    items = []
+    try:
+        for item in ftp.mlsd():
+            name, metadata = item
+            if name in ['.', '..']:
+                continue
+            items.append((name, metadata))
+    except (ftplib.error_perm, ConnectionRefusedError, OSError) as e:
+        print(f"MLSD failed ({e}), falling back to NLST...")
+        # Fallback to NLST
+        try:
+            file_list = ftp.nlst()
+            for name in file_list:
+                if name in ['.', '..']:
+                    continue
+                # Try to get file size
+                size = 0
+                try:
+                    ftp.voidcmd('TYPE I')  # Binary mode
+                    size = ftp.size(name)
+                except:
+                    pass
+                
+                # Determine if directory
+                is_dir = is_ftp_dir(ftp, name)
+                metadata = {'type': 'dir' if is_dir else 'file', 'size': size if not is_dir else 0}
+                items.append((name, metadata))
+        except Exception as e2:
+            print(f"Directory listing failed: {e2}")
+            return
+    
+    for name, metadata in items:
         remote_path = os.path.join(remote_dir, name)
         local_path = os.path.join(local_dir, name)
 
@@ -142,7 +184,7 @@ def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, por
             print(f"Entering directory: {remote_path}")
             ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote)
         else:
-            size = int(metadata['size'])
+            size = int(metadata['size']) if metadata['size'] else 0
             future = executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
             if cleanup_remote:
                 future.add_done_callback(lambda f: print(f"Scheduling deletion for {remote_path}") or delete_ftp_file(ftp, remote_path) if f.result() else None)
@@ -231,6 +273,10 @@ def main():
             print("Connecting to FTP server...")
             ftp.connect(args.host, args.port, timeout=60) # Set timeout to 60 seconds
             ftp.login(args.user, args.password)
+            
+            # Enable passive mode (helps with NAT/firewall issues)
+            ftp.set_pasv(True)
+            print("Passive mode enabled")
 
             while True:
                 print(f"Scanning {args.remote_dir}...")
