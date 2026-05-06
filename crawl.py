@@ -244,7 +244,9 @@ def main():
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             print("Connecting to SFTP server...")
-            ssh.connect(args.host, port=args.port, username=args.user, password=args.password)
+            ssh.connect(args.host, port=args.port, username=args.user, password=args.password,
+                        look_for_keys=False, allow_agent=False,
+                        disabled_algorithms={"pubkeys": ["rsa-sha2-256", "rsa-sha2-512"]})
 
             sftp = ssh.open_sftp()
             while True:
