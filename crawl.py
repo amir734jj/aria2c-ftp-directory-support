@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib, time, threading, re, shutil, posixpath
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
@@ -106,6 +107,24 @@ class DownloadProgressTracker:
 
 tracker = DownloadProgressTracker()
 
+class ResilientFTP(ftplib.FTP):
+    def makepasv(self):
+        if self.af == socket.AF_INET:
+            response = self.sendcmd("PASV")
+            if response.startswith("200 Type set to"):
+                response = self.getresp()
+            untrusted_host, port = ftplib.parse227(response)
+            if self.trust_server_pasv_ipv4_address:
+                host = untrusted_host
+            else:
+                host = self.sock.getpeername()[0]
+            return host, port
+
+        response = self.sendcmd("EPSV")
+        if response.startswith("200 Type set to"):
+            response = self.getresp()
+        return ftplib.parse229(response, self.sock.getpeername())
+
 def stop_all_subprocesses():
     tracker.log_event("Stopping all subprocesses...")
     for proc in subprocesses:
@@ -146,7 +165,7 @@ def delete_sftp_file(sftp, path):
         tracker.log_event(f"Error deleting SFTP path {path}: {e}")
 
 def create_ftp_connection(host, port, user, password):
-    ftp = ftplib.FTP()
+    ftp = ResilientFTP()
     ftp.connect(host, port, timeout=60)
     ftp.login(user, password)
     ftp.set_pasv(True)
