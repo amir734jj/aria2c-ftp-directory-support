@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib, time, threading, re, shutil, posixpath
+import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib, time, threading, re, posixpath
 import socket
 from concurrent.futures import ThreadPoolExecutor
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
 from urllib.parse import quote
 
 subprocesses = []
@@ -13,47 +17,60 @@ class DownloadProgressTracker:
         self.completed = 0
         self.active_downloads = 0
         self.progress = {}
-        self.interactive = sys.stdout.isatty()
+        self.console = Console()
+        self.interactive = self.console.is_terminal
+        self.live = None
 
-    def _clear_progress(self):
-        if self.interactive:
-            sys.stdout.write("\r\033[2K")
+    def _build_table(self):
+        active = list(self.progress.values())
+        average = sum(item["percent"] for item in active) // len(active) if active else 0
+        summary = (
+            f"Downloads: {self.completed}/{self.total_queued} complete | "
+            f"{len(active)} active | {average}% average"
+        )
+        table = Table(
+            title=summary,
+            title_style="bold cyan",
+            header_style="bold white",
+            border_style="bright_black",
+            expand=True,
+        )
+        table.add_column("File", ratio=1, no_wrap=True, overflow="ellipsis")
+        table.add_column("Progress", justify="right", width=10)
+        table.add_column("Speed", justify="right", width=14)
+        table.add_column("ETA", justify="right", width=12)
+
+        for item in active:
+            percent = item["percent"]
+            progress_style = "green" if percent == 100 else "cyan"
+            table.add_row(
+                Text(item["filename"]),
+                Text(f"{percent}%", style=progress_style),
+                Text(item["speed"] or "-"),
+                Text(item["eta"] or "-"),
+            )
+        return table
 
     def _render_progress(self):
-        if not self.interactive or not self.progress:
+        if not self.interactive:
             return
 
-        active = list(self.progress.items())
-        average = sum(item["percent"] for _, item in active) // len(active)
-        prefix = f"[{self.completed}/{self.total_queued} done | {len(active)} active] {average}% overall"
-        available = max(shutil.get_terminal_size((120, 20)).columns - len(prefix) - 3, 0)
-        details = []
-
-        for _, item in active:
-            detail = f"{item['filename']}: {item['percent']}%"
-            if item["speed"]:
-                detail += f" {item['speed']}"
-            if item["eta"]:
-                detail += f" ETA {item['eta']}"
-
-            separator_length = 3 if details else 0
-            if sum(len(value) for value in details) + separator_length * len(details) + len(detail) > available:
-                remaining = len(active) - len(details)
-                if remaining:
-                    details.append(f"+{remaining} more")
-                break
-            details.append(detail)
-
-        self._clear_progress()
-        status = f"{prefix} | {' | '.join(details)}" if details else prefix
-        terminal_width = shutil.get_terminal_size((120, 20)).columns
-        sys.stdout.write(status[:max(terminal_width - 1, 1)])
-        sys.stdout.flush()
+        table = self._build_table()
+        if self.live is None:
+            self.live = Live(table, console=self.console, refresh_per_second=4, transient=True)
+            self.live.start()
+        else:
+            self.live.update(table, refresh=True)
 
     def _print_event(self, message):
-        self._clear_progress()
-        print(message, flush=True)
+        self.console.print(message, markup=False)
         self._render_progress()
+
+    def close(self):
+        with self.lock:
+            if self.live is not None:
+                self.live.stop()
+                self.live = None
 
     def log_event(self, message):
         with self.lock:
@@ -410,4 +427,7 @@ def main():
     tracker.log_event("All downloads complete.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        tracker.close()
