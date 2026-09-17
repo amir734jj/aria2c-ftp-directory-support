@@ -1,1 +1,7 @@
 downloads
+bin
+lib
+*.cfg
+lib64
+downloads
+__pycache__
