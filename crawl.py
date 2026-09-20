@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import paramiko, os, stat, subprocess, argparse, signal, sys, ftplib, time, threading, re, posixpath
+import paramiko, os, stat, subprocess, argparse, signal, ftplib, threading, re, posixpath
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from rich.console import Console
@@ -9,6 +9,8 @@ from rich.text import Text
 from urllib.parse import quote
 
 subprocesses = []
+subprocesses_lock = threading.Lock()
+shutdown_requested = threading.Event()
 
 class DownloadProgressTracker:
     def __init__(self):
@@ -20,6 +22,51 @@ class DownloadProgressTracker:
         self.console = Console()
         self.interactive = self.console.is_terminal
         self.live = None
+
+    @staticmethod
+    def _parse_byte_rate(value):
+        match = re.fullmatch(r"([\d.]+)([KMGTPE]?i?B)", value)
+        if not match:
+            return 0.0
+
+        units = {
+            "B": 1,
+            "KB": 1000,
+            "MB": 1000 ** 2,
+            "GB": 1000 ** 3,
+            "TB": 1000 ** 4,
+            "PB": 1000 ** 5,
+            "EB": 1000 ** 6,
+            "KiB": 1024,
+            "MiB": 1024 ** 2,
+            "GiB": 1024 ** 3,
+            "TiB": 1024 ** 4,
+            "PiB": 1024 ** 5,
+            "EiB": 1024 ** 6,
+        }
+        return float(match.group(1)) * units[match.group(2)]
+
+    @staticmethod
+    def _format_byte_rate(bytes_per_second):
+        units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+        value = bytes_per_second
+        unit = units[0]
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                break
+            value /= 1024
+        return f"{value:.1f}{unit}"
+
+    @staticmethod
+    def _format_eta(seconds):
+        seconds = max(0, int(round(seconds)))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h{minutes}m"
+        if minutes:
+            return f"{minutes}m{seconds}s"
+        return f"{seconds}s"
 
     def _build_table(self):
         active = list(self.progress.values())
@@ -49,10 +96,29 @@ class DownloadProgressTracker:
                 Text(item["speed"] or "-"),
                 Text(item["eta"] or "-"),
             )
+
+        total_size = sum(item["size"] for item in active)
+        downloaded_size = sum(item["size"] * item["percent"] / 100 for item in active)
+        total_percent = round(downloaded_size * 100 / total_size) if total_size else average
+        total_speed = sum(self._parse_byte_rate(item["speed"]) for item in active)
+        total_eta = self._format_eta((total_size - downloaded_size) / total_speed) if total_speed else "-"
+        table.add_section()
+        table.add_row(
+            Text("TOTAL", style="bold"),
+            Text(f"{total_percent}%", style="bold cyan"),
+            Text(self._format_byte_rate(total_speed) if total_speed else "-", style="bold"),
+            Text(total_eta, style="bold"),
+        )
         return table
 
     def _render_progress(self):
         if not self.interactive:
+            return
+
+        if not self.progress:
+            if self.live is not None:
+                self.live.stop()
+                self.live = None
             return
 
         table = self._build_table()
@@ -80,10 +146,16 @@ class DownloadProgressTracker:
         with self.lock:
             self.total_queued += 1
 
-    def start_download(self, task_id, filename):
+    def start_download(self, task_id, filename, item_size):
         with self.lock:
             self.active_downloads += 1
-            self.progress[task_id] = {"filename": filename, "percent": 0, "speed": "", "eta": ""}
+            self.progress[task_id] = {
+                "filename": filename,
+                "size": item_size or 0,
+                "percent": 0,
+                "speed": "",
+                "eta": "",
+            }
             if self.interactive:
                 self._render_progress()
             else:
@@ -144,7 +216,10 @@ class ResilientFTP(ftplib.FTP):
 
 def stop_all_subprocesses():
     tracker.log_event("Stopping all subprocesses...")
-    for proc in subprocesses:
+    with subprocesses_lock:
+        active_subprocesses = list(subprocesses)
+
+    for proc in active_subprocesses:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)
             try:
@@ -159,9 +234,12 @@ def stop_all_subprocesses():
     tracker.log_event("All subprocesses terminated.")
 
 def signal_handler(sig, frame):
+    if shutdown_requested.is_set():
+        return
+
+    shutdown_requested.set()
     tracker.log_event("Signal received, stopping...")
     stop_all_subprocesses()
-    sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -238,16 +316,19 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
         "-o", item_filename,
     ]
 
-    tracker.start_download(remote_path, item_filename)
-    
-    process = subprocess.Popen(
-        aria2c_command,
-        start_new_session=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
-    )
-    subprocesses.append(process)
+    with subprocesses_lock:
+        if shutdown_requested.is_set():
+            return None
+
+        tracker.start_download(remote_path, item_filename, item_size)
+        process = subprocess.Popen(
+            aria2c_command,
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True
+        )
+        subprocesses.append(process)
 
     # Continuously parse aria2c stdout without forwarding its scrolling output.
     if process.stdout:
@@ -256,8 +337,9 @@ def download_file(protocol, remote_path, local_dir, item_filename, item_size, us
 
     process.wait()
 
-    if process in subprocesses:
-        subprocesses.remove(process)
+    with subprocesses_lock:
+        if process in subprocesses:
+            subprocesses.remove(process)
 
     success = process.returncode == 0
     tracker.finish_download(remote_path, item_filename, success=success)
@@ -386,9 +468,12 @@ def main():
                 tracker.log_event(f"Scanning {args.remote_dir}...")
                 with ThreadPoolExecutor(max_workers=args.max_concurrency) as executor:
                     sftp_recursive_download(sftp, args.remote_dir, args.local_dir, args.user, args.password, args.host, args.port, args.max_connections, executor, args.force, args.filter_extension, args.cleanup_remote)
+                if shutdown_requested.is_set():
+                    break
                 if args.watch:
                     tracker.log_event(f"Watching... (retrying in {args.watch_interval} seconds)")
-                    time.sleep(args.watch_interval)
+                    if shutdown_requested.wait(args.watch_interval):
+                        break
                 else:
                     break
             sftp.close()
@@ -414,9 +499,12 @@ def main():
                 except Exception:
                     pass
 
+                if shutdown_requested.is_set():
+                    break
                 if args.watch:
                     tracker.log_event(f"Watching... (retrying in {args.watch_interval} seconds)")
-                    time.sleep(args.watch_interval)
+                    if shutdown_requested.wait(args.watch_interval):
+                        break
                 else:
                     break
         except Exception as e:
@@ -424,7 +512,10 @@ def main():
             stop_all_subprocesses()
             raise
 
-    tracker.log_event("All downloads complete.")
+    if shutdown_requested.is_set():
+        tracker.log_event("Shutdown complete.")
+    else:
+        tracker.log_event("All downloads complete.")
 
 if __name__ == "__main__":
     try:
