@@ -355,7 +355,15 @@ def is_ftp_dir(ftp, path):
     except ftplib.error_perm:
         return False
 
-def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
+def download_priority(job):
+    _, local_dir, filename, item_size = job
+    local_path = os.path.join(local_dir, filename)
+    local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+    completion_ratio = min(local_size / item_size, 1) if item_size > 0 else 0
+    size_priority = item_size if item_size > 0 else float("inf")
+    return (-completion_ratio, size_priority)
+
+def collect_ftp_downloads(ftp, remote_dir, local_dir, jobs):
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
 
@@ -402,19 +410,26 @@ def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, por
 
         if metadata.get('type') == 'dir':
             tracker.log_event(f"Entering directory: {remote_path}")
-            ftp_recursive_download(ftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote)
+            collect_ftp_downloads(ftp, remote_path, local_path, jobs)
         else:
             size = int(metadata.get('size', 0))
-            tracker.add_task()
-            future = executor.submit(download_file, "ftp", remote_path, local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
-            
-            if cleanup_remote:
-                def handle_cleanup(f, path=remote_path):
-                    if f.result():
-                        delete_ftp_file(host, port, user, password, path)
-                future.add_done_callback(handle_cleanup)
+            jobs.append((remote_path, local_dir, name, size))
 
-def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
+def ftp_recursive_download(ftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
+    jobs = []
+    collect_ftp_downloads(ftp, remote_dir, local_dir, jobs)
+
+    for remote_path, job_local_dir, name, size in sorted(jobs, key=download_priority):
+        tracker.add_task()
+        future = executor.submit(download_file, "ftp", remote_path, job_local_dir, name, size, user, password, host, port, max_connections, force, filter_extension)
+
+        if cleanup_remote:
+            def handle_cleanup(f, path=remote_path):
+                if f.result():
+                    delete_ftp_file(host, port, user, password, path)
+            future.add_done_callback(handle_cleanup)
+
+def collect_sftp_downloads(sftp, remote_dir, local_dir, jobs):
     if not os.path.exists(local_dir):
         os.makedirs(local_dir)
 
@@ -424,12 +439,19 @@ def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, p
 
         if stat.S_ISDIR(item.st_mode):
             tracker.log_event(f"Entering directory: {remote_path}")
-            sftp_recursive_download(sftp, remote_path, local_path, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote)
+            collect_sftp_downloads(sftp, remote_path, local_path, jobs)
         else:
-            tracker.add_task()
-            future = executor.submit(download_file, "sftp", remote_path, local_dir, item.filename, item.st_size, user, password, host, port, max_connections, force, filter_extension)
-            if cleanup_remote:
-                future.add_done_callback(lambda f, path=remote_path: delete_sftp_file(sftp, path) if f.result() else None)
+            jobs.append((remote_path, local_dir, item.filename, item.st_size))
+
+def sftp_recursive_download(sftp, remote_dir, local_dir, user, password, host, port, max_connections, executor, force, filter_extension, cleanup_remote):
+    jobs = []
+    collect_sftp_downloads(sftp, remote_dir, local_dir, jobs)
+
+    for remote_path, job_local_dir, filename, size in sorted(jobs, key=download_priority):
+        tracker.add_task()
+        future = executor.submit(download_file, "sftp", remote_path, job_local_dir, filename, size, user, password, host, port, max_connections, force, filter_extension)
+        if cleanup_remote:
+            future.add_done_callback(lambda f, path=remote_path: delete_sftp_file(sftp, path) if f.result() else None)
 
 def main():
     parser = argparse.ArgumentParser(description="FTP/SFTP recursive downloader.")
